@@ -1,11 +1,24 @@
 use crate::position::Position;
-use crate::ship::{Orientation, ShipPlacement};
+use crate::ship::{ShipPlacement};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum CellState {
     UNKNOWN,
     WATER,
     SHIP,
+}
+
+#[derive(Debug)]
+enum PlacementError {
+    OutOfBounds,
+    Overlap,
+    Touching,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MarkingError {
+    OutOfBounds,
+    Contradiction,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -43,66 +56,84 @@ impl Board {
         self.board.get(idx)
     }
 
-    fn set_cell(&mut self, position: Position, cell: Cell) -> Result<(), (Position, &'static str)> {
+    fn set_cell(&mut self, position: Position, cell: Cell) -> Result<(), MarkingError> {
         if position.x >= 10 || position.y >= 10 {
-            return Err((position, "wrong index"));
+            return Err(MarkingError::OutOfBounds);
         }
 
         let idx = usize::from(position.x) * 10 + usize::from(position.y);
         self.board[idx] = cell;
         Ok(())
     }
-    
+
     pub fn is_valid_placement(&self, ship_placement: ShipPlacement) -> bool {
-        let length = usize::from(ship_placement.ship.length);
-        let mut positions: Vec<Position> = vec![ship_placement.position];
-        for i in 2..=length {
-            if ship_placement.orientation == Orientation::HORIZONTAL {
-                positions.push(Position {
-                    x: ship_placement.position.x,
-                    y: ship_placement.position.y + (i - 1) as u8,
-                })
-            } else {
-                positions.push(Position {
-                    x: ship_placement.position.x + (i - 1) as u8,
-                    y: ship_placement.position.y,
-                })
-            }
-        }
-    
-        let is_valid = Self::check_ship_placement(self, &positions);
-        return is_valid;
+        let positions = ship_placement.determine_ship_locations();
+
+        return Self::check_ship_placement(self, &positions).is_ok();
     }
-    
-    fn check_ship_placement(&self, positions: &[Position]) -> bool {
+
+    fn check_ship_placement(&self, positions: &[Position]) -> Result<(), PlacementError> {
         for position in positions {
             if position.x >= 10 || position.y >= 10 {
-                return false;
+                return Err(PlacementError::OutOfBounds);
             }
             if let Some(cell) = self.get_cell(*position) {
                 if cell.state == CellState::SHIP {
-                    return false;
+                    return Err(PlacementError::Overlap);
                 }
             } // technically not needed 
             for x in position.x.saturating_sub(1)..=(position.x + 1).min(9) {
                 for y in position.y.saturating_sub(1)..=(position.y + 1).min(9) {
                     if let Some(cell) = self.get_cell(Position { x, y }) {
                         if cell.state == CellState::SHIP {
-                            return false;
+                            return Err(PlacementError::Touching);
                         }
                     }
                 }
             }
         }
-        return true;
+        return Ok(());
+    }
+
+    pub fn mark_water(&mut self, position: Position) -> Result<(), MarkingError> {
+        if let Some(cell) = self.get_cell(position) {
+            if cell.state == CellState::SHIP {
+                return Err(MarkingError::Contradiction);
+            } else {
+                return self.set_cell(
+                    position,
+                    Cell {
+                        state: (CellState::WATER),
+                    },
+                );
+            }
+        } else {
+            return Err(MarkingError::OutOfBounds);
+        }
+    }
+
+    pub fn mark_ship(&mut self, position: Position) -> Result<(), MarkingError> {
+        if let Some(cell) = self.get_cell(position) {
+            if cell.state == CellState::WATER {
+                return Err(MarkingError::Contradiction);
+            } else {
+                return self.set_cell(
+                    position,
+                    Cell {
+                        state: (CellState::SHIP),
+                    },
+                );
+            }
+        } else {
+            return Err(MarkingError::OutOfBounds);
+        }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ship::Ship;
+    use crate::ship::{Orientation, Ship};
 
     #[test]
     fn valid_ship_on_empty_board() {
@@ -273,5 +304,84 @@ mod tests {
 
         // (3,6), (4,6), (5,6), (6,6)
         assert!(board.is_valid_placement(placement));
+    }
+
+    #[test]
+    fn mark_unknown_as_ship() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        assert!(board.mark_ship(position).is_ok());
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::SHIP);
+    }
+
+    #[test]
+    fn mark_ship_as_ship() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        board.mark_ship(position).unwrap();
+
+        assert!(board.mark_ship(position).is_ok());
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::SHIP);
+    }
+
+    #[test]
+    fn mark_water_as_ship_is_contradiction() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        board.mark_water(position).unwrap();
+
+        assert_eq!(board.mark_ship(position), Err(MarkingError::Contradiction));
+
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::WATER);
+    }
+
+    #[test]
+    fn mark_unknown_as_water() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        assert!(board.mark_water(position).is_ok());
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::WATER);
+    }
+
+    #[test]
+    fn mark_water_as_water() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        board.mark_water(position).unwrap();
+
+        assert!(board.mark_water(position).is_ok());
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::WATER);
+    }
+
+    #[test]
+    fn mark_ship_as_water_is_contradiction() {
+        let mut board = Board::new();
+        let position = Position { x: 3, y: 4 };
+
+        board.mark_ship(position).unwrap();
+
+        assert_eq!(board.mark_water(position), Err(MarkingError::Contradiction));
+
+        assert_eq!(board.get_cell(position).unwrap().state, CellState::SHIP);
+    }
+
+    #[test]
+    fn marking_out_of_bounds_fails() {
+        let mut board = Board::new();
+
+        assert_eq!(
+            board.mark_ship(Position { x: 10, y: 5 }),
+            Err(MarkingError::OutOfBounds)
+        );
+
+        assert_eq!(
+            board.mark_water(Position { x: 5, y: 10 }),
+            Err(MarkingError::OutOfBounds)
+        );
     }
 }
